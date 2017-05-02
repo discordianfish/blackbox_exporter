@@ -23,8 +23,9 @@ import (
 	"syscall"
 	"time"
 
-	"gopkg.in/yaml.v2"
 	"sync"
+
+	"gopkg.in/yaml.v2"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/config"
@@ -100,6 +101,10 @@ type DNSRRValidator struct {
 	FailIfNotMatchesRegexp []string `yaml:"fail_if_not_matches_regexp"`
 }
 
+type Account interface {
+	Book(r *http.Request) error
+}
+
 var Probers = map[string]func(string, http.ResponseWriter, Module) bool{
 	"http": probeHTTP,
 	"tcp":  probeTCP,
@@ -129,7 +134,7 @@ func (sc *SafeConfig) reloadConfig(confFile string) (err error) {
 	return nil
 }
 
-func probeHandler(w http.ResponseWriter, r *http.Request, conf *Config) {
+func probeHandler(w http.ResponseWriter, r *http.Request, conf *Config, account Account) {
 	params := r.URL.Query()
 	target := params.Get("target")
 	if target == "" {
@@ -151,7 +156,10 @@ func probeHandler(w http.ResponseWriter, r *http.Request, conf *Config) {
 		http.Error(w, fmt.Sprintf("Unknown prober %q", module.Prober), 400)
 		return
 	}
-
+	if err := account.Book(r); err != nil {
+		http.Error(w, err.Error(), 403)
+		return
+	}
 	start := time.Now()
 	success := prober(target, w, module)
 	fmt.Fprintf(w, "probe_duration_seconds %f\n", time.Since(start).Seconds())
@@ -209,7 +217,7 @@ func main() {
 			}
 		}
 	}()
-
+	account := &accountNoop{}
 	http.Handle("/metrics", prometheus.Handler())
 	http.HandleFunc("/probe",
 		func(w http.ResponseWriter, r *http.Request) {
@@ -217,7 +225,7 @@ func main() {
 			c := sc.C
 			sc.RUnlock()
 
-			probeHandler(w, r, c)
+			probeHandler(w, r, c, account)
 		})
 	http.HandleFunc("/-/reload",
 		func(w http.ResponseWriter, r *http.Request) {
